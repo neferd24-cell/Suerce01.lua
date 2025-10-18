@@ -1,340 +1,626 @@
---[[
-    Vixfer Fly/Noclip/Teleport Menu
-    Autor: Vixfer
-    Descripción: Menú UI para activar/desactivar modo volar, noclip y teletransporte a jugadores.
-    El menú se puede mover con mouse/touch/teclado.
---]]
+-- Vixfer_Menu_System
+-- Pegar este Script en ServerScriptService. Al correr, creará RemoteEvents y dos scripts:
+--  - Server handler (servidor)
+--  - Client UI (LocalScript en StarterPlayerScripts)
+-- Diseñado para tu propio juego, legal y sin exploits.
 
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
+local StarterPlayer = game:GetService("StarterPlayer")
+local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
 
--- RemoteEvents
-local flyEvent = ReplicatedStorage:FindFirstChild("VixferFlyEvent")
-if not flyEvent then
-    flyEvent = Instance.new("RemoteEvent")
-    flyEvent.Name = "VixferFlyEvent"
-    flyEvent.Parent = ReplicatedStorage
+-- Helper: create folder if not exists
+local function ensureFolder(parent, name)
+    local f = parent:FindFirstChild(name)
+    if not f then
+        f = Instance.new("Folder")
+        f.Name = name
+        f.Parent = parent
+    end
+    return f
 end
 
-local noclipEvent = ReplicatedStorage:FindFirstChild("VixferNoclipEvent")
-if not noclipEvent then
-    noclipEvent = Instance.new("RemoteEvent")
-    noclipEvent.Name = "VixferNoclipEvent"
-    noclipEvent.Parent = ReplicatedStorage
+-- Create RemoteEvents container
+local remoteFolder = ensureFolder(ReplicatedStorage, "Vixfer_RemoteEvents")
+local function ensureEvent(name)
+    local e = remoteFolder:FindFirstChild(name)
+    if not e then
+        e = Instance.new("RemoteEvent")
+        e.Name = name
+        e.Parent = remoteFolder
+    end
+    return e
 end
 
-local teleportEvent = ReplicatedStorage:FindFirstChild("VixferTeleportEvent")
-if not teleportEvent then
-    teleportEvent = Instance.new("RemoteEvent")
-    teleportEvent.Name = "VixferTeleportEvent"
-    teleportEvent.Parent = ReplicatedStorage
+local RE_RequestRole      = ensureEvent("RequestRole")
+local RE_RequestTeleport  = ensureEvent("RequestTeleport")
+local RE_ChangeSpeed      = ensureEvent("ChangeSpeed")
+local RE_RequestInventory = ensureEvent("RequestInventory")
+local RE_ToggleAmbient    = ensureEvent("ToggleAmbient")
+local RE_RequestRoundInfo = ensureEvent("RequestRoundInfo")
+local RE_ToggleSpecMode   = ensureEvent("ToggleSpecMode")
+local RE_ValidateLight    = ensureEvent("ValidateFlashlight") -- server can validate battery, etc.
+local RE_CameraChange     = ensureEvent("CameraChange")
+local RE_ToggleMenu       = ensureEvent("ToggleMenu") -- optional server hook
+
+-- Ensure Tools folder in ReplicatedStorage (for WeaponDistributor demo)
+local toolsFolder = ensureFolder(ReplicatedStorage, "Tools")
+
+-- SERVER SCRIPT (will be created as child script)
+local serverSource = [[
+-- Vixfer_ServerHandler (auto)
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local toolsFolder = ReplicatedStorage:WaitForChild("Tools")
+local remotes = ReplicatedStorage:WaitForChild("Vixfer_RemoteEvents")
+
+local RE_RequestRole = remotes:WaitForChild("RequestRole")
+local RE_RequestTeleport = remotes:WaitForChild("RequestTeleport")
+local RE_ChangeSpeed = remotes:WaitForChild("ChangeSpeed")
+local RE_RequestInventory = remotes:WaitForChild("RequestInventory")
+local RE_ToggleAmbient = remotes:WaitForChild("ToggleAmbient")
+local RE_RequestRoundInfo = remotes:WaitForChild("RequestRoundInfo")
+local RE_ToggleSpecMode = remotes:WaitForChild("ToggleSpecMode")
+local RE_ValidateLight = remotes:WaitForChild("ValidateFlashlight")
+local RE_CameraChange = remotes:WaitForChild("CameraChange")
+
+-- Basic role assignment & round manager (simple, for testing)
+local ROUND_TIME = 90
+local roundActive = false
+local nightNumber = 0
+
+local function clearRoles()
+    for _,p in pairs(Players:GetPlayers()) do
+        p:SetAttribute("Role", nil)
+    end
 end
 
--- Crear el menú UI
+local function assignRoles()
+    local all = Players:GetPlayers()
+    if #all == 0 then return end
+    clearRoles()
+    -- 1 murderer
+    local murderer = all[math.random(1,#all)]
+    murderer:SetAttribute("Role","Murderer")
+    -- 1 sheriff if >= 2 players
+    if #all >= 2 then
+        local candidate
+        repeat
+            candidate = all[math.random(1,#all)]
+        until candidate ~= murderer
+        candidate:SetAttribute("Role","Sheriff")
+    end
+    for _,p in pairs(all) do
+        if not p:GetAttribute("Role") then p:SetAttribute("Role","Innocent") end
+    end
+end
+
+-- Round loop (non-blocking)
+spawn(function()
+    while true do
+        wait(5)
+        -- start round when >=1 player (you can change condition)
+        if not roundActive and #Players:GetPlayers() > 0 then
+            roundActive = true
+            nightNumber = nightNumber + 1
+            Workspace:SetAttribute("Night", nightNumber)
+            -- assign roles
+            assignRoles()
+            -- notify clients about round start (clients can request roles)
+            RE_RequestRoundInfo:FireAllClients({night = nightNumber, time = ROUND_TIME})
+            -- round timer
+            wait(ROUND_TIME)
+            -- end round
+            roundActive = false
+            clearRoles()
+            -- optional small pause
+            wait(6)
+        end
+    end
+end)
+
+-- Remote handlers
+RE_RequestRole.OnServerEvent:Connect(function(player)
+    local role = player:GetAttribute("Role") or "None"
+    RE_RequestRole:FireClient(player, role)
+end)
+
+RE_RequestTeleport.OnServerEvent:Connect(function(player, tpName)
+    if typeof(tpName) ~= "string" then return end
+    local teleports = Workspace:FindFirstChild("Teleports")
+    if not teleports then return end
+    local part = teleports:FindFirstChild(tpName)
+    if part and part:IsA("BasePart") then
+        local char = player.Character
+        if char and char:FindFirstChild("HumanoidRootPart") then
+            char:SetPrimaryPartCFrame(part.CFrame + Vector3.new(0,3,0))
+        end
+    end
+end)
+
+RE_ChangeSpeed.OnServerEvent:Connect(function(player, newSpeed)
+    if typeof(newSpeed) ~= "number" then return end
+    -- basic validation
+    if newSpeed < 8 then newSpeed = 8 end
+    if newSpeed > 40 then newSpeed = 40 end
+    -- apply to humanoid if exists
+    local char = player.Character
+    if char and char:FindFirstChild("Humanoid") then
+        char.Humanoid.WalkSpeed = newSpeed
+    end
+end)
+
+RE_RequestInventory.OnServerEvent:Connect(function(player)
+    -- send list of tool names in backpack
+    local inv = {}
+    for _,it in pairs(player.Backpack:GetChildren()) do
+        if it:IsA("Tool") then table.insert(inv, it.Name) end
+    end
+    RE_RequestInventory:FireClient(player, inv)
+end)
+
+RE_ToggleAmbient.OnServerEvent:Connect(function(player, on)
+    -- simple broadcast to all: toggle ambient audio
+    RE_ToggleAmbient:FireAllClients(on)
+end)
+
+RE_RequestRoundInfo.OnServerEvent:Connect(function(player)
+    RE_RequestRoundInfo:FireClient(player, {night = Workspace:GetAttribute("Night") or 0, time = ROUND_TIME, active = roundActive})
+end)
+
+RE_ToggleSpecMode.OnServerEvent:Connect(function(player, on)
+    -- here server could mark attribute; clients implement camera change
+    player:SetAttribute("Spectator", on and true or false)
+end)
+
+RE_ValidateLight.OnServerEvent:Connect(function(player, state)
+    -- placeholder: server could validate battery, protect abuse
+    -- we just replicate state back to client (ack)
+    RE_ValidateLight:FireClient(player, state)
+end)
+
+RE_CameraChange.OnServerEvent:Connect(function(player, mode)
+    -- store preferred camera mode
+    player:SetAttribute("CameraMode", mode)
+end)
+
+-- Simple PlayerAdded: load default attributes
+Players.PlayerAdded:Connect(function(p)
+    p:SetAttribute("Role", nil)
+    p:SetAttribute("Spectator", false)
+    p:SetAttribute("CameraMode", "Default")
+end)
+]]
+
+-- CLIENT LOCALSCRIPT (will be created in StarterPlayerScripts)
+local clientSource = [[
+-- Vixfer_ClientUI (auto)
+-- LocalScript to place in StarterPlayerScripts. Builds UI and hotkeys.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local remotes = ReplicatedStorage:WaitForChild("Vixfer_RemoteEvents")
+
+local RE_RequestRole = remotes:WaitForChild("RequestRole")
+local RE_RequestTeleport = remotes:WaitForChild("RequestTeleport")
+local RE_ChangeSpeed = remotes:WaitForChild("ChangeSpeed")
+local RE_RequestInventory = remotes:WaitForChild("RequestInventory")
+local RE_ToggleAmbient = remotes:WaitForChild("ToggleAmbient")
+local RE_RequestRoundInfo = remotes:WaitForChild("RequestRoundInfo")
+local RE_ToggleSpecMode = remotes:WaitForChild("ToggleSpecMode")
+local RE_ValidateLight = remotes:WaitForChild("ValidateFlashlight")
+local RE_CameraChange = remotes:WaitForChild("CameraChange")
+local RE_ToggleMenu = remotes:FindFirstChild("ToggleMenu")
+
+-- create ScreenGui
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "VixferFlyMenu"
+screenGui.Name = "VixferMainGui"
+screenGui.Parent = playerGui
 screenGui.ResetOnSpawn = false
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 270, 0, 260)
-frame.Position = UDim2.new(0.5, -135, 0.1, 0)
-frame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
-frame.BorderSizePixel = 0
-frame.AnchorPoint = Vector2.new(0.5, 0)
-frame.Active = true
-frame.Draggable = true -- Para teclado/mouse
+-- main frame (dark + neon blue accent)
+local main = Instance.new("Frame", screenGui)
+main.Name = "MainPanel"
+main.Size = UDim2.new(0,860,0,520)
+main.Position = UDim2.new(0.5, -430, 0.08, 0)
+main.BackgroundColor3 = Color3.fromRGB(12,12,18)
+main.BorderSizePixel = 0
+main.AnchorPoint = Vector2.new(0.5, 0)
 
-local uiCorner = Instance.new("UICorner")
-uiCorner.CornerRadius = UDim.new(0, 16)
-uiCorner.Parent = frame
-
-local title = Instance.new("TextLabel")
-title.Text = "Vixfer"
-title.Font = Enum.Font.GothamBold
-title.TextSize = 24
-title.TextColor3 = Color3.fromRGB(255, 255, 255)
+-- title
+local title = Instance.new("TextLabel", main)
+title.Size = UDim2.new(1, -20, 0, 64)
+title.Position = UDim2.new(0,10,0,10)
 title.BackgroundTransparency = 1
-title.Size = UDim2.new(1, 0, 0, 36)
-title.Parent = frame
+title.Font = Enum.Font.Bebas
+title.TextScaled = true
+title.Text = "99 NOCHES EN EL BOSQUE — vixfer0511"
+title.TextColor3 = Color3.fromRGB(180,220,255)
+title.TextStrokeTransparency = 0.7
 
--- Botón Volar
-local flyButton = Instance.new("TextButton")
-flyButton.Text = "Activar Volar"
-flyButton.Font = Enum.Font.Gotham
-flyButton.TextSize = 20
-flyButton.TextColor3 = Color3.fromRGB(255,255,255)
-flyButton.BackgroundColor3 = Color3.fromRGB(60, 120, 220)
-flyButton.Size = UDim2.new(0.8, 0, 0, 36)
-flyButton.Position = UDim2.new(0.1, 0, 0.18, 0)
-flyButton.Parent = frame
+-- left panel: profiles + inventory
+local left = Instance.new("Frame", main)
+left.Size = UDim2.new(0.45, -20, 0.78, -20)
+left.Position = UDim2.new(0.025, 0, 0.14, 0)
+left.BackgroundTransparency = 0.2
+left.BackgroundColor3 = Color3.fromRGB(18,18,24)
 
-local uiCornerBtn = Instance.new("UICorner")
-uiCornerBtn.CornerRadius = UDim.new(0, 12)
-uiCornerBtn.Parent = flyButton
+local profLabel = Instance.new("TextLabel", left)
+profLabel.Size = UDim2.new(1, -10, 0, 36)
+profLabel.Position = UDim2.new(0,5,0,5)
+profLabel.BackgroundTransparency = 1
+profLabel.Font = Enum.Font.GothamBold
+profLabel.Text = "Perfiles"
+profLabel.TextColor3 = Color3.fromRGB(220,220,230)
 
--- Botón Noclip
-local noclipButton = Instance.new("TextButton")
-noclipButton.Text = "Activar Noclip"
-noclipButton.Font = Enum.Font.Gotham
-noclipButton.TextSize = 20
-noclipButton.TextColor3 = Color3.fromRGB(255,255,255)
-noclipButton.BackgroundColor3 = Color3.fromRGB(80, 180, 80)
-noclipButton.Size = UDim2.new(0.8, 0, 0, 36)
-noclipButton.Position = UDim2.new(0.1, 0, 0.36, 0)
-noclipButton.Parent = frame
+local profilesList = Instance.new("ScrollingFrame", left)
+profilesList.Size = UDim2.new(1, -10, 0.35, -10)
+profilesList.Position = UDim2.new(0,5,0,46)
+profilesList.CanvasSize = UDim2.new(0,0,0,0)
+profilesList.BackgroundTransparency = 0.5
 
-local uiCornerBtn2 = Instance.new("UICorner")
-uiCornerBtn2.CornerRadius = UDim.new(0, 12)
-uiCornerBtn2.Parent = noclipButton
+-- sample profiles
+local sampleProfiles = {
+    {name="vixfer0511", desc="Creador - Admin"},
+    {name="Nocturno", desc="Runner"},
+    {name="Guardia", desc="Sheriff main"},
+    {name="Espía", desc="Inocente"}
+}
+for i,p in ipairs(sampleProfiles) do
+    local b = Instance.new("TextButton", profilesList)
+    b.Size = UDim2.new(1, -10, 0, 48)
+    b.Position = UDim2.new(0,5,0,(i-1)*56 + 5)
+    b.Text = p.name.." — "..p.desc
+    b.BackgroundTransparency = 0.4
+    b.Font = Enum.Font.Gotham
+    b.TextColor3 = Color3.fromRGB(240,240,240)
+end
+profilesList.CanvasSize = UDim2.new(0,0,0,#sampleProfiles*56)
 
--- Botón Teleport
-local teleportButton = Instance.new("TextButton")
-teleportButton.Text = "Teletransportarse"
-teleportButton.Font = Enum.Font.Gotham
-teleportButton.TextSize = 20
-teleportButton.TextColor3 = Color3.fromRGB(255,255,255)
-teleportButton.BackgroundColor3 = Color3.fromRGB(120, 80, 180)
-teleportButton.Size = UDim2.new(0.8, 0, 0, 36)
-teleportButton.Position = UDim2.new(0.1, 0, 0.54, 0)
-teleportButton.Parent = frame
+-- inventory display
+local invLabel = Instance.new("TextLabel", left)
+invLabel.Size = UDim2.new(1, -10, 0, 28)
+invLabel.Position = UDim2.new(0,5,0, (0.35*left.Size.Y.Offset) + 60)
+invLabel.BackgroundTransparency = 1
+invLabel.Font = Enum.Font.Gotham
+invLabel.Text = "Inventario (presiona 'Inventario')"
+invLabel.TextColor3 = Color3.fromRGB(200,200,200)
 
-local uiCornerBtn3 = Instance.new("UICorner")
-uiCornerBtn3.CornerRadius = UDim.new(0, 12)
-uiCornerBtn3.Parent = teleportButton
+local invList = Instance.new("TextLabel", left)
+invList.Size = UDim2.new(1, -10, 0, 120)
+invList.Position = UDim2.new(0,5,0, (0.35*left.Size.Y.Offset) + 90)
+invList.BackgroundTransparency = 0.6
+invList.Font = Enum.Font.Gotham
+invList.TextWrapped = true
+invList.RichText = true
+invList.Text = "Sin datos"
+invList.TextColor3 = Color3.fromRGB(230,230,230)
 
--- Info
-local info = Instance.new("TextLabel")
-info.Text = "WASD: Moverse | Q/E: Subir/Bajar\nNoclip atraviesa paredes\nElige jugador para teleport"
-info.Font = Enum.Font.Gotham
-info.TextSize = 15
-info.TextColor3 = Color3.fromRGB(200, 200, 220)
-info.BackgroundTransparency = 1
-info.Size = UDim2.new(1, -20, 0, 44)
-info.Position = UDim2.new(0, 10, 0.72, 0)
-info.TextWrapped = true
-info.Parent = frame
+-- right panel: actions & controls
+local right = Instance.new("Frame", main)
+right.Size = UDim2.new(0.48, -20, 0.78, -20)
+right.Position = UDim2.new(0.5, 10, 0.14, 0)
+right.BackgroundTransparency = 0.2
+right.BackgroundColor3 = Color3.fromRGB(15,15,20)
 
--- Dropdown de jugadores para teleport
-local playerDropdown = Instance.new("Frame")
-playerDropdown.Size = UDim2.new(0.8, 0, 0, 36)
-playerDropdown.Position = UDim2.new(0.1, 0, 0.62, 0)
-playerDropdown.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-playerDropdown.Visible = false
-playerDropdown.Parent = frame
-playerDropdown.ClipsDescendants = true
-
-local uiCornerDrop = Instance.new("UICorner")
-uiCornerDrop.CornerRadius = UDim.new(0, 10)
-uiCornerDrop.Parent = playerDropdown
-
-local dropdownLabel = Instance.new("TextLabel")
-dropdownLabel.Text = "Selecciona jugador..."
-dropdownLabel.Font = Enum.Font.Gotham
-dropdownLabel.TextSize = 18
-dropdownLabel.TextColor3 = Color3.fromRGB(255,255,255)
-dropdownLabel.BackgroundTransparency = 1
-dropdownLabel.Size = UDim2.new(1, -10, 1, 0)
-dropdownLabel.Position = UDim2.new(0, 5, 0, 0)
-dropdownLabel.TextXAlignment = Enum.TextXAlignment.Left
-dropdownLabel.Parent = playerDropdown
-
-local dropdownList = Instance.new("Frame")
-dropdownList.Size = UDim2.new(1, 0, 0, 0)
-dropdownList.Position = UDim2.new(0, 0, 1, 0)
-dropdownList.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
-dropdownList.Visible = false
-dropdownList.Parent = playerDropdown
-dropdownList.ClipsDescendants = true
-
-local uiCornerList = Instance.new("UICorner")
-uiCornerList.CornerRadius = UDim.new(0, 8)
-uiCornerList.Parent = dropdownList
-
-local function updateDropdown()
-    for _, child in dropdownList:GetChildren() do
-        if child:IsA("TextButton") then
-            child:Destroy()
-        end
-    end
-    local y = 0
-    for _, player in Players:GetPlayers() do
-        if player ~= LocalPlayer then
-            local btn = Instance.new("TextButton")
-            btn.Text = player.DisplayName .. " (@" .. player.Name .. ")"
-            btn.Font = Enum.Font.Gotham
-            btn.TextSize = 16
-            btn.TextColor3 = Color3.fromRGB(255,255,255)
-            btn.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
-            btn.Size = UDim2.new(1, 0, 0, 28)
-            btn.Position = UDim2.new(0, 0, 0, y)
-            btn.Parent = dropdownList
-            btn.AutoButtonColor = true
-            btn.MouseButton1Click:Connect(function()
-                dropdownLabel.Text = btn.Text
-                playerDropdown.Visible = false
-                dropdownList.Visible = false
-                teleportEvent:FireServer(player.Name)
-            end)
-            y = y + 28
-        end
-    end
-    dropdownList.Size = UDim2.new(1, 0, 0, y)
+local function makeButton(parent, txt, ypos)
+    local b = Instance.new("TextButton", parent)
+    b.Size = UDim2.new(0.9,0,0,48)
+    b.Position = UDim2.new(0.05, 0, ypos, 0)
+    b.Text = txt
+    b.Font = Enum.Font.GothamBold
+    b.TextScaled = true
+    b.BackgroundColor3 = Color3.fromRGB(25,25,35)
+    b.TextColor3 = Color3.fromRGB(240,240,240)
+    return b
 end
 
-dropdownLabel.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        updateDropdown()
-        dropdownList.Visible = not dropdownList.Visible
-    end
+local btn_viewRole = makeButton(right, "Ver mi rol (F2)", 0)
+local btn_teleport = makeButton(right, "Teleport - TP_1 (F3)", 0.14)
+local btn_speedUp = makeButton(right, "Aumentar Velocidad (F4)", 0.28)
+local btn_toggleLight = makeButton(right, "Linterna ON/OFF (F5)", 0.42)
+local btn_spectator = makeButton(right, "Activar Espectador", 0.56)
+local btn_camToggle = makeButton(right, "Cambiar Cámara", 0.7)
+local btn_roundInfo = makeButton(right, "Mostrar tiempo de ronda", 0.84)
+local btn_ambient = makeButton(right, "Ambient ON/OFF", 0.98)
+
+-- small HUD (top-left)
+local hud = Instance.new("Frame", screenGui)
+hud.Size = UDim2.new(0,240,0,90)
+hud.Position = UDim2.new(0.01,0,0.01,0)
+hud.BackgroundTransparency = 0.25
+hud.BorderSizePixel = 0
+local hudRole = Instance.new("TextLabel", hud)
+hudRole.Size = UDim2.new(1, -10, 0.45, -10)
+hudRole.Position = UDim2.new(0,5,0,5)
+hudRole.BackgroundTransparency = 1
+hudRole.TextScaled = true
+hudRole.Font = Enum.Font.GothamBold
+hudRole.Text = "Rol: ?"
+
+local hudNight = Instance.new("TextLabel", hud)
+hudNight.Size = UDim2.new(1, -10, 0.45, -10)
+hudNight.Position = UDim2.new(0,5,0,45)
+hudNight.BackgroundTransparency = 1
+hudNight.TextScaled = true
+hudNight.Font = Enum.Font.Gotham
+hudNight.Text = "Noche: 0"
+
+-- Toggle button (bottom-left)
+local toggleBtn = Instance.new("TextButton", screenGui)
+toggleBtn.Size = UDim2.new(0,64,0,64)
+toggleBtn.Position = UDim2.new(0.02,0,0.9,-80)
+toggleBtn.Text = "ON"
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextScaled = true
+toggleBtn.BackgroundColor3 = Color3.fromRGB(18,140,255)
+local menuVisible = true
+toggleBtn.MouseButton1Click:Connect(function()
+    menuVisible = not menuVisible
+    main.Visible = menuVisible
+    toggleBtn.Text = menuVisible and "ON" or "OFF"
+    toggleBtn.BackgroundColor3 = menuVisible and Color3.fromRGB(18,140,255) or Color3.fromRGB(90,90,90)
+    if RE_ToggleMenu then RE_ToggleMenu:FireServer(menuVisible) end
 end)
 
-Players.PlayerAdded:Connect(updateDropdown)
-Players.PlayerRemoving:Connect(updateDropdown)
+-- FUNCTIONALITY
 
--- Mostrar/ocultar dropdown con botón teleport
-teleportButton.MouseButton1Click:Connect(function()
-    playerDropdown.Visible = not playerDropdown.Visible
-    dropdownList.Visible = false
-    dropdownLabel.Text = "Selecciona jugador..."
-    updateDropdown()
-end)
-
--- Drag para touch (móvil)
-local dragging = false
-local dragInput, mousePos, framePos
-
-frame.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        mousePos = input.Position
-        framePos = frame.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
-    end
-end)
-
-frame.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        local delta = input.Position - mousePos
-        frame.Position = UDim2.new(framePos.X.Scale, framePos.X.Offset + delta.X, framePos.Y.Scale, framePos.Y.Offset + delta.Y)
-    end
-end)
-
--- Script de volar
-local flying = false
-local flySpeed = 60
-
-local function setFly(state)
-    flying = state
-    if flying then
-        flyButton.Text = "Desactivar Volar"
-        flyButton.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
-    else
-        flyButton.Text = "Activar Volar"
-        flyButton.BackgroundColor3 = Color3.fromRGB(60, 120, 220)
-    end
-    flyEvent:FireServer(flying)
+-- 1) Show role (request server)
+local function showRole()
+    RE_RequestRole:FireServer()
 end
-
-flyButton.MouseButton1Click:Connect(function()
-    setFly(not flying)
+RE_RequestRole.OnClientEvent:Connect(function(role)
+    hudRole.Text = "Rol: "..tostring(role)
+    -- pop-up temporary
+    local popup = Instance.new("TextLabel", screenGui)
+    popup.Size = UDim2.new(0,300,0,80)
+    popup.Position = UDim2.new(0.5,-150,0.75, -40)
+    popup.BackgroundTransparency = 0.2
+    popup.Font = Enum.Font.GothamBold
+    popup.TextScaled = true
+    popup.Text = "TU ROL: "..tostring(role)
+    if role == "Murderer" then popup.TextColor3 = Color3.fromRGB(255,80,80) end
+    if role == "Sheriff" then popup.TextColor3 = Color3.fromRGB(120,200,255) end
+    if role == "Innocent" then popup.TextColor3 = Color3.fromRGB(200,200,200) end
+    delay(3, function() popup:Destroy() end)
 end)
 
--- Control de vuelo
-local moveDirection = Vector3.new()
-local upDown = 0
+btn_viewRole.MouseButton1Click:Connect(showRole)
 
-UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    if flying then
-        if input.KeyCode == Enum.KeyCode.W then moveDirection = Vector3.new(0,0,-1)
-        elseif input.KeyCode == Enum.KeyCode.S then moveDirection = Vector3.new(0,0,1)
-        elseif input.KeyCode == Enum.KeyCode.A then moveDirection = Vector3.new(-1,0,0)
-        elseif input.KeyCode == Enum.KeyCode.D then moveDirection = Vector3.new(1,0,0)
-        elseif input.KeyCode == Enum.KeyCode.Q then upDown = -1
-        elseif input.KeyCode == Enum.KeyCode.E then upDown = 1
-        end
-    end
+-- 2) Teleport (request server)
+local function teleportTo(name)
+    RE_RequestTeleport:FireServer(name)
+end
+btn_teleport.MouseButton1Click:Connect(function()
+    teleportTo("TP_1")
 end)
 
-UserInputService.InputEnded:Connect(function(input)
-    if flying then
-        if input.KeyCode == Enum.KeyCode.W or input.KeyCode == Enum.KeyCode.S then moveDirection = Vector3.new(0,0,0)
-        elseif input.KeyCode == Enum.KeyCode.A or input.KeyCode == Enum.KeyCode.D then moveDirection = Vector3.new(0,0,0)
-        elseif input.KeyCode == Enum.KeyCode.Q or input.KeyCode == Enum.KeyCode.E then upDown = 0
-        end
-    end
-end)
+-- 3) Change speed
+local currentSpeed = 16
+local function changeSpeed(delta)
+    currentSpeed = math.clamp(currentSpeed + delta, 8, 40)
+    RE_ChangeSpeed:FireServer(currentSpeed)
+end
+btn_speedUp.MouseButton1Click:Connect(function() changeSpeed(4) end)
 
-RunService.RenderStepped:Connect(function(dt)
-    if flying and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-        local hrp = LocalPlayer.Character.HumanoidRootPart
-        local cam = workspace.CurrentCamera
-        local direction = (cam.CFrame:VectorToWorldSpace(moveDirection) + Vector3.new(0, upDown, 0)).Unit
-        if direction.Magnitude > 0 then
-            hrp.Velocity = direction * flySpeed
+-- 4) Flashlight toggle (local visual + server validation)
+local flashlightOn = false
+local flashPart -- optional visible part to simulate
+local function toggleFlashlight()
+    flashlightOn = not flashlightOn
+    -- simple local visual: create a point light attached to character head
+    local char = player.Character
+    if char and char:FindFirstChild("Head") then
+        if flashlightOn then
+            local p = Instance.new("PointLight", char.Head)
+            p.Name = "VixFlash"
+            p.Range = 18
+            p.Brightness = 3
+            p.Shadows = true
+            flashPart = p
         else
-            hrp.Velocity = Vector3.new(0,0,0)
+            local existing = char.Head:FindFirstChild("VixFlash")
+            if existing then existing:Destroy() end
         end
-        LocalPlayer.Character.Humanoid.PlatformStand = true
-    elseif LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-        LocalPlayer.Character.Humanoid.PlatformStand = false
     end
-end)
-
--- Desactivar volar al morir
-LocalPlayer.CharacterAdded:Connect(function(char)
-    setFly(false)
-end)
-
-flyEvent.OnClientEvent:Connect(function(state)
-    setFly(state)
-end)
-
--- Noclip
-local noclip = false
-local function setNoclip(state)
-    noclip = state
-    if noclip then
-        noclipButton.Text = "Desactivar Noclip"
-        noclipButton.BackgroundColor3 = Color3.fromRGB(220, 120, 60)
-    else
-        noclipButton.Text = "Activar Noclip"
-        noclipButton.BackgroundColor3 = Color3.fromRGB(80, 180, 80)
-    end
-    noclipEvent:FireServer(noclip)
+    RE_ValidateLight:FireServer(flashlightOn)
 end
-
-noclipButton.MouseButton1Click:Connect(function()
-    setNoclip(not noclip)
+RE_ValidateLight.OnClientEvent:Connect(function(state)
+    -- server ack (no-op for now)
 end)
+btn_toggleLight.MouseButton1Click:Connect(toggleFlashlight)
 
--- Loop de noclip (solo cliente visual, server lo valida)
-RunService.Stepped:Connect(function()
-    if noclip and LocalPlayer.Character then
-        for _, v in LocalPlayer.Character:GetChildren() do
-            if v:IsA("BasePart") then
-                v.CanCollide = false
+-- 5) Spectator mode (simple: make character transparent + free camera)
+local specActive = false
+local previousCameraType
+local previousCameraSubject
+local function toggleSpectator()
+    specActive = not specActive
+    RE_ToggleSpecMode:FireServer(specActive)
+    local cam = workspace.CurrentCamera
+    if specActive then
+        -- detach camera
+        previousCameraType = cam.CameraType
+        previousCameraSubject = cam.CameraSubject
+        cam.CameraType = Enum.CameraType.Scriptable
+        -- simple free cam: look at player but don't move character (for demo)
+        cam.CFrame = cam.CFrame * CFrame.new(0,5,10)
+        local char = player.Character
+        if char then
+            for _,part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.Transparency = 0.5
+                end
+            end
+        end
+    else
+        -- restore
+        cam.CameraType = Enum.CameraType.Custom
+        if player.Character and player.Character:FindFirstChild("Humanoid") then
+            cam.CameraSubject = player.Character:FindFirstChild("Humanoid")
+        end
+        local char = player.Character
+        if char then
+            for _,part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.Transparency = 0
+                end
             end
         end
     end
+end
+btn_spectator.MouseButton1Click:Connect(toggleSpectator)
+
+-- 6) Camera change (first/third)
+local camMode = "Default"
+local function changeCamera()
+    local cam = workspace.CurrentCamera
+    if camMode == "Default" then
+        cam.CameraType = Enum.CameraType.Custom
+        camMode = "Third"
+        RE_CameraChange:FireServer(camMode)
+    else
+        cam.CameraType = Enum.CameraType.Custom
+        camMode = "Default"
+        RE_CameraChange:FireServer(camMode)
+    end
+end
+btn_camToggle.MouseButton1Click:Connect(changeCamera)
+
+-- 7) Round info
+local function requestRound()
+    RE_RequestRoundInfo:FireServer()
+end
+RE_RequestRoundInfo.OnClientEvent:Connect(function(info)
+    if info and type(info) == "table" then
+        hudNight.Text = "Noche: "..tostring(info.night or 0)
+        -- show timer popup
+        local tpop = Instance.new("TextLabel", screenGui)
+        tpop.Size = UDim2.new(0,280,0,60)
+        tpop.Position = UDim2.new(0.5,-140,0.02, 0)
+        tpop.BackgroundTransparency = 0.2
+        tpop.Font = Enum.Font.GothamBold
+        tpop.TextScaled = true
+        tpop.Text = "Noche "..tostring(info.night or 0).." — Tiempo: "..tostring(info.time or 0)
+        delay(4, function() if tpop and tpop.Parent then tpop:Destroy() end end)
+    end
+end)
+btn_roundInfo.MouseButton1Click:Connect(requestRound)
+
+-- 8) Inventory (request from server)
+local function requestInventory()
+    RE_RequestInventory:FireServer()
+end
+RE_RequestInventory.OnClientEvent:Connect(function(list)
+    if type(list) == "table" then
+        if #list == 0 then
+            invList.Text = "Inventario vacío"
+        else
+            invList.Text = table.concat(list, "\n")
+        end
+    end
+end)
+-- map a small UI button to request inventory
+-- create small Inventory button
+local invBtn = Instance.new("TextButton", left)
+invBtn.Size = UDim2.new(0.45, -10, 0, 40)
+invBtn.Position = UDim2.new(0.05, 0, 1, -50)
+invBtn.Text = "Inventario"
+invBtn.Font = Enum.Font.GothamBold
+invBtn.MouseButton1Click:Connect(requestInventory)
+
+-- 9) Ambient sound toggle
+local ambientOn = true
+local ambientSound
+local function toggleAmbient(state)
+    ambientOn = not ambientOn
+    if ambientOn then
+        if not ambientSound then
+            ambientSound = Instance.new("Sound", workspace)
+            ambientSound.Name = "VixAmbient"
+            ambientSound.Looped = true
+            ambientSound.Volume = 0.5
+            -- no external file: use a default sound id if you have one; left blank for user to replace
+            -- ambientSound.SoundId = "rbxassetid://<TU_SONIDO>"
+            ambientSound:Play()
+        else
+            ambientSound:Play()
+        end
+    else
+        if ambientSound then ambientSound:Stop() end
+    end
+    -- notify server for record
+    RE_ToggleAmbient:FireServer(ambientOn)
+end
+btn_ambient.MouseButton1Click:Connect(toggleAmbient)
+RE_ToggleAmbient.OnClientEvent:Connect(function(state)
+    -- server broadcast (if needed)
+    ambientOn = state
+    if not state and ambientSound then ambientSound:Stop() end
 end)
 
-noclipEvent.OnClientEvent:Connect(function(state)
-    setNoclip(state)
+-- 10) Close menu handled by toggle button above
+
+-- HOTKEYS (F1-F5)
+local KEY_MAP = {
+    ToggleMenu = Enum.KeyCode.F1, -- toggle menu
+    ShowRole = Enum.KeyCode.F2,
+    QuickTP = Enum.KeyCode.F3,
+    SpeedUp = Enum.KeyCode.F4,
+    ToggleLight = Enum.KeyCode.F5,
+}
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == KEY_MAP.ToggleMenu then
+        menuVisible = not menuVisible
+        main.Visible = menuVisible
+    elseif input.KeyCode == KEY_MAP.ShowRole then
+        showRole()
+    elseif input.KeyCode == KEY_MAP.QuickTP then
+        teleportTo("TP_1")
+    elseif input.KeyCode == KEY_MAP.SpeedUp then
+        changeSpeed(4)
+    elseif input.KeyCode == KEY_MAP.ToggleLight then
+        toggleFlashlight()
+    end
 end)
 
-LocalPlayer.CharacterAdded:Connect(function(char)
-    setNoclip(false)
-end)
+-- Initialize: request round info
+delay(1, function() RE_RequestRoundInfo:FireServer() end)
 
--- UI Parenting
-frame.Parent = screenGui
-screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+]]
+
+-- Create the server child script
+local existingServer = script.Parent:FindFirstChild("Vixfer_ServerHandler")
+if not existingServer then
+    local s = Instance.new("Script")
+    s.Name = "Vixfer_ServerHandler"
+    s.Source = serverSource
+    s.Parent = script.Parent
+    print("Vixfer: ServerHandler created (Vixfer_ServerHandler).")
+else
+    print("Vixfer: ServerHandler already exists.")
+end
+
+-- Create local client script in StarterPlayerScripts
+local starterScripts = StarterPlayer:FindFirstChild("StarterPlayerScripts")
+if not starterScripts then
+    starterScripts = Instance.new("Folder", StarterPlayer)
+    starterScripts.Name = "StarterPlayerScripts"
+end
+
+local existingClient = starterScripts:FindFirstChild("Vixfer_ClientUI")
+if not existingClient then
+    local ls = Instance.new("LocalScript")
+    ls.Name = "Vixfer_ClientUI"
+    ls.Source = clientSource
+    ls.Parent = starterScripts
+    print("Vixfer: Client UI created (StarterPlayerScripts.Vixfer_ClientUI).")
+else
+    print("Vixfer: Client UI already exists.")
+end
+
+print("Vixfer_Menu_System: Setup complete. Rejoin or respawn a player to load the client UI if not present.")
