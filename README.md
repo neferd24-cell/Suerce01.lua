@@ -1,16 +1,33 @@
--- 🌀 Noclip de pruebas con pantalla de carga (solo en Studio)
+-- 🌀 Noclip Pro de pruebas (solo en Studio)
+-- Muestra pantalla "Vixfer presenta" + carga + botón activable
 -- Hecho por ChatGPT 💚
 
 local player = game.Players.LocalPlayer
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
-local button = script.Parent
-local noclipEnabled = false
-local dragging = false
-local dragInput, mousePos, framePos
+-- 🖤 Pantalla de presentación
+local intro = Instance.new("Frame")
+intro.Size = UDim2.new(1, 0, 1, 0)
+intro.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+intro.ZIndex = 10
+intro.Parent = script.Parent
 
--- 🌟 Diseño del botón
+local label = Instance.new("TextLabel", intro)
+label.Size = UDim2.new(1, 0, 1, 0)
+label.BackgroundTransparency = 1
+label.Text = "✨ Vixfer presenta ✨\n\nNoclip :) Welcome"
+label.TextColor3 = Color3.fromRGB(255, 255, 255)
+label.Font = Enum.Font.GothamBold
+label.TextScaled = true
+label.ZIndex = 11
+
+wait(3) -- Duración de pantalla de presentación
+intro:Destroy()
+
+-- 🧱 Crear botón automáticamente
+local button = Instance.new("TextButton")
+button.Parent = script.Parent
 button.Text = "🚀 Activar Noclip"
 button.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 button.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -32,6 +49,8 @@ stroke.Thickness = 2
 stroke.Color = Color3.fromRGB(100, 255, 150)
 
 -- 🖐 Hacer el botón movible
+local dragging = false
+local mousePos, framePos
 local function update(input)
 	local delta = input.Position - mousePos
 	button.Position = UDim2.new(framePos.X.Scale, framePos.X.Offset + delta.X, framePos.Y.Scale, framePos.Y.Offset + delta.Y)
@@ -56,7 +75,9 @@ UserInputService.InputChanged:Connect(function(input)
 	end
 end)
 
--- ⚙️ Función para activar o desactivar noclip
+-- ⚙️ Control del Noclip
+local noclipEnabled = false
+
 local function setNoclip(state)
 	local character = player.Character
 	if not character then return end
@@ -73,8 +94,8 @@ local function createLoadingScreen()
 	screen.Size = UDim2.new(1, 0, 1, 0)
 	screen.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
 	screen.BackgroundTransparency = 0
-	screen.Parent = button.Parent
 	screen.ZIndex = 10
+	screen.Parent = script.Parent
 
 	local text = Instance.new("TextLabel", screen)
 	text.Size = UDim2.new(1, 0, 0, 100)
@@ -108,7 +129,7 @@ local function createLoadingScreen()
 	screen:Destroy()
 end
 
--- 🚀 Activar / desactivar noclip con pantalla de carga
+-- 🚀 Click del botón para activar/desactivar Noclip
 button.MouseButton1Click:Connect(function()
 	if not noclipEnabled then
 		button.Text = "🔄 Activando..."
@@ -125,7 +146,7 @@ button.MouseButton1Click:Connect(function()
 	end
 end)
 
--- 🧲 Mantener noclip activo
+-- 🧲 Mantener Noclip activo
 RunService.Stepped:Connect(function()
 	if noclipEnabled and player.Character then
 		for _, part in pairs(player.Character:GetDescendants()) do
@@ -135,3 +156,4 @@ RunService.Stepped:Connect(function()
 		end
 	end
 end)
+
